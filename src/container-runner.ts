@@ -236,6 +236,19 @@ function buildVolumeMounts(
       isMain,
     );
     mounts.push(...validatedMounts);
+
+    // Shadow .env files in additional mounts — same pattern as project root.
+    // Prevents container agents from reading secrets stored alongside scripts.
+    for (const mount of validatedMounts) {
+      const envFile = path.join(mount.hostPath, '.env');
+      if (fs.existsSync(envFile)) {
+        mounts.push({
+          hostPath: '/dev/null',
+          containerPath: path.join(mount.containerPath, '.env'),
+          readonly: true,
+        });
+      }
+    }
   }
 
   return mounts;
