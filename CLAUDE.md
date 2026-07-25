@@ -204,6 +204,17 @@ Four types of skills. See [CONTRIBUTING.md](CONTRIBUTING.md) for the full taxono
 | `/init-onecli` | Install OneCLI Agent Vault and migrate `.env` credentials |
 | `/migrate-memory` | Carry a group's agent memory across a provider switch (operator-run, both directions) |
 
+## Known Upstream Issues
+
+When running `/update-nanoclaw`, check whether these are resolved yet and
+report status prominently near the top of the update's output, before the
+rest of the update's usual noisy output:
+
+- [#3026](https://github.com/nanocoai/nanoclaw/issues/3026) — duplicate
+  replies: a re-wrap nudge re-runs the model and re-sends after the agent
+  already replied via `send_message`. Fix tracked in PR #3028 (unmerged as
+  of 2026-07-26). If merged, note it plainly to the user before continuing.
+
 ## Contributing
 
 Before creating a PR, adding a skill, or preparing any contribution, you MUST read [CONTRIBUTING.md](CONTRIBUTING.md). It covers accepted change types, the four skill types and their guidelines, `SKILL.md` format rules, and the pre-submission checklist.
