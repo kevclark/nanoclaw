@@ -1,12 +1,15 @@
 /**
  * migrate-v2 step: tasks
  *
- * Port v1 scheduled_tasks into v2 session inbound DBs.
+ * Port v1 scheduled_tasks into v2's per-series task system sessions.
  *
  * v1: scheduled_tasks table (schedule_type, schedule_value, next_run)
- * v2: messages_in rows with kind='task' in per-session inbound.db
+ * v2: messages_in rows with kind='task' in the task's own system-session
+ *     inbound.db (see resolveTaskSession) — tasks no longer live in a chat
+ *     session, since they route through an isolated session and the agent
+ *     picks the delivery destination at fire time.
  *
- * Requires: db step must have run first (agent_groups + messaging_groups seeded).
+ * Requires: db step must have run first (agent_groups seeded).
  *
  * Usage: pnpm exec tsx setup/migrate-v2/tasks.ts <v1-path>
  */
@@ -18,13 +21,9 @@ import Database from 'better-sqlite3';
 import { DATA_DIR } from '../../src/config.js';
 import { initDb, closeDb } from '../../src/db/connection.js';
 import { getAgentGroupByFolder } from '../../src/db/agent-groups.js';
-import { getMessagingGroupByPlatform } from '../../src/db/messaging-groups.js';
 import { runMigrations } from '../../src/db/migrations/index.js';
-import { insertTask } from '../../src/modules/scheduling/db.js';
-import { openInboundDb, resolveSession } from '../../src/session-manager.js';
-import { readEnvFile } from '../../src/env.js';
-import { buildDiscordResolver, type DiscordResolver } from './discord-resolver.js';
-import { parseJid, v2PlatformId } from './shared.js';
+import { insertTaskRow } from '../../src/modules/scheduling/db.js';
+import { openInboundDb, resolveTaskSession } from '../../src/session-manager.js';
 
 interface V1Task {
   id: string;
@@ -106,37 +105,17 @@ async function main(): Promise<void> {
   let skipped = 0;
   let failed = 0;
 
-  // Mirrors db.ts: Discord platform_id needs API lookup to recover guildId.
-  let discordResolver: DiscordResolver | null = null;
-  const hasDiscord = activeTasks.some((t) => parseJid(t.chat_jid)?.channel_type === 'discord');
-  if (hasDiscord) {
-    const env = readEnvFile(['DISCORD_BOT_TOKEN']);
-    discordResolver = await buildDiscordResolver(env.DISCORD_BOT_TOKEN ?? '');
-  }
-
   for (const t of activeTasks) {
     try {
       const ag = getAgentGroupByFolder(t.group_folder);
       if (!ag) { skipped++; continue; }
 
-      const parsed = parseJid(t.chat_jid);
-      if (!parsed) { skipped++; continue; }
-
-      let platformId: string;
-      if (parsed.channel_type === 'discord') {
-        const resolved = discordResolver?.resolve(parsed.id) ?? null;
-        if (!resolved) { skipped++; continue; }
-        platformId = resolved;
-      } else {
-        platformId = v2PlatformId(parsed.channel_type, t.chat_jid);
-      }
-      const mg = getMessagingGroupByPlatform(parsed.channel_type, platformId);
-      if (!mg) { skipped++; continue; }
-
       const scheduling = toCron(t);
       if (!scheduling) { skipped++; continue; }
 
-      const { session } = resolveSession(ag.id, mg.id, null, 'shared');
+      // Each task series gets its own isolated system session — same
+      // find-or-create path `ncl tasks create` uses (resolveTaskSession).
+      const { session } = resolveTaskSession(ag.id, t.id);
       const inboxDb = openInboundDb(ag.id, session.id);
       try {
         // Idempotence check
@@ -145,17 +124,22 @@ async function main(): Promise<void> {
           .get(t.id) as { id: string } | undefined;
         if (existing) { skipped++; continue; }
 
-        insertTask(inboxDb, {
+        insertTaskRow(inboxDb, {
           id: t.id,
+          seriesId: t.id,
           processAfter: scheduling.processAfter,
           recurrence: scheduling.recurrence,
-          platformId,
-          channelType: parsed.channel_type,
-          threadId: null,
           content: JSON.stringify({
             prompt: t.prompt,
             script: t.script ?? null,
-            migrated_from_v1: { original_id: t.id, context_mode: t.context_mode ?? null },
+            originSessionId: null,
+            migrated_from_v1: {
+              original_id: t.id,
+              context_mode: t.context_mode ?? null,
+              // Tasks no longer carry a fixed destination — the agent picks one
+              // at fire time. Kept for context on where this used to post.
+              original_chat_jid: t.chat_jid,
+            },
           }),
         });
         migrated++;
